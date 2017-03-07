@@ -351,6 +351,7 @@ for( i in 1:length(TestSplittr)){
   x&lt;-as.data.frame(TestSplittr[[i]])
   TestdataMod&lt;-rbind(TestdataMod,x)
 }
+
 indexclasse&lt;-grep(&quot;classe&quot;,names(TestdataMod))
 indexwindow&lt;-grep(&quot;Window&quot;,names(TestdataMod))
 
