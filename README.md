@@ -1,1 +1,2 @@
-# PredictiveModelling.github.io
+# PredictiveModelling
+Predictive Modelling- Application to Weight Lifting exercise data

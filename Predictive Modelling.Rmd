@@ -1,0 +1,352 @@
+---
+title: "Predictive Modelling - Application to Weight Lifting Dataset"
+author: "Subrata"
+date: "March 2, 2017"
+output: html_document
+---
+
+```{r setup, echo=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = FALSE)
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(RANN))
+suppressPackageStartupMessages(library(randomForest))
+```
+
+## Introduction
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants.
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har.
+
+
+```{r load, cache=TRUE}
+URL1="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+
+if (!file.exists("./pml-training.csv")) {
+        download.file(URL1, destfile = "./pml-training.csv")
+}
+Traindata<-read.csv("./pml-training.csv", stringsAsFactors = FALSE)
+
+```
+
+## Basic Processing
+
+It was mentioned by the researchers[1] that they had extracted the features using a sliding windows approach with different length from  of 0.5 seconds to 2.5 seconds with 0.5 seconds overlap.In each step of the sliding window the various features were extracted.
+
+As can be seen from the **Fig 1**, the features are extracted at each step as per the time windows marked as 1 to 5 for length 0.5 sec to 2.5 sec respectively with overlap of 0.5 sec.
+
+```{r basicpreprocessing,cache=TRUE}
+
+##Split the Train data by the timestamp_part_1
+Splitter<-Traindata$raw_timestamp_part_1
+TrainSplit<-split(Traindata,Splitter)
+
+mutate_func<-function(x){as.data.frame(x)%>%mutate(Window=
+  ifelse(raw_timestamp_part_2<quantile(raw_timestamp_part_2)[2],1,
+    ifelse(raw_timestamp_part_2<quantile(raw_timestamp_part_2)[3],2,
+      ifelse(raw_timestamp_part_2<quantile(raw_timestamp_part_2)[4], 3,
+        ifelse(raw_timestamp_part_2<quantile(raw_timestamp_part_2)[5],4,5)))))}
+  
+TrainSplittr<-lapply(TrainSplit,mutate_func)
+
+##Recombine back to a dataframe
+TraindataMod<-as.data.frame(NULL)
+for( i in 1:length(TrainSplittr)){
+  x<-as.data.frame(TrainSplittr[[i]])
+  TraindataMod<-rbind(TraindataMod,x)
+}
+
+#Split the training data into testing and training sets
+intrain<-createDataPartition(y=TraindataMod$classe,p=.75,list=FALSE)
+Training<-TraindataMod[intrain,]
+Testing<-TraindataMod[-intrain,]
+
+## Create the training data set retaining only the predictors
+TrainingData<-Training[,-c(1,2,3,4,5,6,7)]
+indexclasse<-grep("classe",names(TrainingData))
+indexwindow<-grep("Window",names(TrainingData))
+
+## Remove near zero variance
+TrainingData<-TrainingData[,-nearZeroVar(TrainingData[,-c(indexclasse,indexwindow)])]
+
+## Preprocess the traindata by scaling, centering, imputing nearest neighbours
+set.seed(12342)
+indexclasse<-grep("classe",names(TrainingData))
+indexwindow<-grep("Window",names(TrainingData))
+
+PreProc<-preProcess(TrainingData[,-c(indexclasse,indexwindow)],method=c("center","scale","knnImpute"))
+TrainingDataProcessed<-predict(PreProc,TrainingData[,-c(indexclasse,indexwindow)])
+
+## Identifying variables which are character classes to remove those
+class<-sapply(TrainingDataProcessed,class)
+identify<-NULL
+for(i in 1:ncol(TrainingDataProcessed)){
+  if(class[[i]]=='character'){
+    TrainingDataProcessed[,i]<-as.numeric(TrainingDataProcessed[,i])
+  }
+}
+
+
+## Remove high correlation predictors
+Correlationmatrix<-cor(TrainingDataProcessed)
+highcorrelation<-findCorrelation(Correlationmatrix,cutoff = .75)
+TrainingDataProcessedCorRem<-TrainingDataProcessed[,-highcorrelation]
+
+TrainingDataProcessedCorRem<-cbind(TrainingDataProcessedCorRem,classe=TrainingData$classe,window=TrainingData$Window)
+
+```
+
+
+```{r plot}
+ggplot(aes(y=raw_timestamp_part_2,x=1:500,col=Window),data=TraindataMod[1:500,])+geom_point()+geom_line()
+```
+
+
+
+Fig 1: Plot of first 500 points for TimeStamp_2
+
+
+Next, we focus on preprocessing the data.
+
+Firstly, we divide the training data into training and testing data sets with 25% of the data set kept in the testing bucket.
+
+Secondly, we use **nearzerovariance** technique to remove all variables with near zero variance.
+
+Thirldy, we impute all missing data points using **k nearest neighbours imputation** technique.
+
+Fourthly, we processed the data by **scaling and centering** to transform the training data into normalized gaussian dataset.
+
+Fiftly, we identify all predictors that have **correlation more than 75%** and remove those from the data set.
+
+After applying the above techniques, we have reduced the predictor space from 152 to 95 using near zero variance and then to 52 by removing predictors correlating at 75%+.
+
+## Training 
+
+As part of training, we firstly adopt random forest and force the algorithm to execute bagging by trying all `r ncol(TrainingDataProcessedCorRem)-2` variables at each split. Bagging will also take into consideration cross validation by default as part of its algorithm.
+
+The results are quite positive with an OOB error reported at **less than 2.5%**.
+
+
+```{r Trainingbagging, cache=TRUE}
+## Fit random forest model
+## Use all predictors to emulate bagging
+## Bagging will implement cross validation by default as part of its algorithm
+set.seed(3454)
+model<- randomForest(classe~., data=TrainingDataProcessedCorRem[,-ncol(TrainingDataProcessedCorRem)], mtry=ncol(TrainingDataProcessedCorRem)-2, importance=TRUE)
+print(model)
+
+
+```
+
+However, we want to further refine the model and hence we identify variables of high importance in the model.
+
+We identified the top 20 variables that seemed important for all five classes of the classification model and re ran the random forest model on these 20 variables. We did not force the model to execute bagging this time.
+
+The results improved with a OOB error estimate reported at **less than 1.5%**. The random forest model used 4 variables at each split out of the 20 variables, we identified.
+
+```{r Trainingrandomforest, cache=TRUE}
+## Find the predictors of high importance
+
+imp<-varImp(model)
+impdata<-data.frame(imp)
+impdata<-impdata%>%mutate(Total=A+B+C+D+E,names=row.names(.))%>%arrange(-Total)
+impvar<-NULL
+
+varImpPlot(model, n.var = 10,main="Variable Importance",bg="blue",color="red")
+
+## Selecting the top 20 variables of importance
+
+for(i in 1: 19){impvar<-paste(impvar,impdata[,7][i],"+")}
+impvar<-paste(impvar,impdata[,7][20])
+form<-as.formula(paste("classe~",impvar))
+
+## Fit the random forest model with the top 20 predictors
+set.seed(1234)
+indexwindow<-grep("Window",names(TrainingData))
+modelfinal<- randomForest(form, data=TrainingDataProcessedCorRem[,-indexwindow], importance=TRUE)
+
+print(modelfinal)
+```
+
+
+## Testing
+We next apply the final model on the testing data post preprocessing the testing data.
+
+The accuracy on the testing data is **nearly 98%**. And for each window, the accuracy is in the range **97% to 99%**. This is exactly how it was reported by the researchers[1].
+
+```{r testing}
+## Preprocess the testing data
+
+##Split the Train data by the timestamp_part_1
+Splitter<-Testing$raw_timestamp_part_1
+TestSplit<-split(Testing,Splitter)
+
+TestSplittr<-lapply(TestSplit,mutate_func)
+
+##Recombine back to a dataframe
+TestdataMod<-as.data.frame(NULL)
+for( i in 1:length(TestSplittr)){
+  x<-as.data.frame(TestSplittr[[i]])
+  TestdataMod<-rbind(TestdataMod,x)
+}
+indexclasse<-grep("classe",names(TestdataMod))
+indexwindow<-grep("Window",names(TestdataMod))
+
+TestingDataProcessed<-predict(PreProc,TestdataMod[,-c(indexclasse,indexwindow)])
+TestingDataProcessed<-cbind(TestingDataProcessed,classe=TestdataMod$classe,window=TestdataMod$Window)
+
+predictoutput<-predict(modelfinal,newdata=TestingDataProcessed)
+confusionMatrix(predictoutput,TestingDataProcessed$classe)
+
+for( i in 1:5){
+  predictwindow<-predict(modelfinal,newdata = subset(TestingDataProcessed,window==i))
+  cat("Window",i, "-","Accuracy:", confusionMatrix(predictwindow,subset(TestingDataProcessed,window==i)$classe)$overall[[1]],"\n")
+}
+
+``` 
+##Conclusion
+
+We have thus applied randomforest with bagging to succesfully predict the class of the 5 types of exercising errors(including the perfect exercise). 
+
+This prediction methodology is however not scalable as there are infinite permuatations of errors that a person can commit and to predict each type of errors using this approach will need infinite training data sets on infinite permutations of exercising errors.
+
+
+##Reference
+1) Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz4a8FjpXvS
+
+##Code Appendix
+
+```{r codes, eval=FALSE, echo=TRUE}
+**Libraries used**
+
+knitr::opts_chunk$set(echo = FALSE)
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(RANN))
+suppressPackageStartupMessages(library(randomForest))
+
+**Data download**
+
+URL1="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+
+if (!file.exists("./pml-training.csv")) {
+        download.file(URL1, destfile = "./pml-training.csv")
+}
+Traindata<-read.csv("./pml-training.csv", stringsAsFactors = FALSE)
+
+**Preprocessing**
+
+Splitter<-Traindata$raw_timestamp_part_1
+TrainSplit<-split(Traindata,Splitter)
+
+mutate_func<-function(x){as.data.frame(x)%>%mutate(Window=
+  ifelse(raw_timestamp_part_2<quantile(raw_timestamp_part_2)[2],1,
+    ifelse(raw_timestamp_part_2<quantile(raw_timestamp_part_2)[3],2,
+      ifelse(raw_timestamp_part_2<quantile(raw_timestamp_part_2)[4], 3,
+        ifelse(raw_timestamp_part_2<quantile(raw_timestamp_part_2)[5],4,5)))))}
+  
+TrainSplittr<-lapply(TrainSplit,mutate_func)
+
+
+TraindataMod<-as.data.frame(NULL)
+for( i in 1:length(TrainSplittr)){
+  x<-as.data.frame(TrainSplittr[[i]])
+  TraindataMod<-rbind(TraindataMod,x)
+}
+
+
+intrain<-createDataPartition(y=TraindataMod$classe,p=.75,list=FALSE)
+Training<-TraindataMod[intrain,]
+Testing<-TraindataMod[-intrain,]
+
+TrainingData<-Training[,-c(1,2,3,4,5,6,7)]
+indexclasse<-grep("classe",names(TrainingData))
+indexwindow<-grep("Window",names(TrainingData))
+
+TrainingData<-TrainingData[,-nearZeroVar(TrainingData[,-c(indexclasse,indexwindow)])]
+
+set.seed(12342)
+indexclasse<-grep("classe",names(TrainingData))
+indexwindow<-grep("Window",names(TrainingData))
+
+PreProc<-preProcess(TrainingData[,-c(indexclasse,indexwindow)],method=c("center","scale","knnImpute"))
+TrainingDataProcessed<-predict(PreProc,TrainingData[,-c(indexclasse,indexwindow)])
+
+class<-sapply(TrainingDataProcessed,class)
+identify<-NULL
+for(i in 1:ncol(TrainingDataProcessed)){
+  if(class[[i]]=='character'){
+    TrainingDataProcessed[,i]<-as.numeric(TrainingDataProcessed[,i])
+  }
+}
+
+
+Correlationmatrix<-cor(TrainingDataProcessed)
+highcorrelation<-findCorrelation(Correlationmatrix,cutoff = .75)
+TrainingDataProcessedCorRem<-TrainingDataProcessed[,-highcorrelation]
+
+TrainingDataProcessedCorRem<-cbind(TrainingDataProcessedCorRem,classe=TrainingData$classe,window=TrainingData$Window)
+
+**Plot Fig 1**
+ggplot(aes(y=raw_timestamp_part_2,x=1:500,col=Window),data=TraindataMod[1:500,])+geom_point()+geom_line()
+
+
+**Random Forest Bagging**
+
+set.seed(3454)
+model<- randomForest(classe~., data=TrainingDataProcessedCorRem[,-ncol(TrainingDataProcessedCorRem)], mtry=ncol(TrainingDataProcessedCorRem)-2, importance=TRUE)
+print(model)
+
+
+**Random Forest**
+
+imp<-varImp(model)
+impdata<-data.frame(imp)
+impdata<-impdata%>%mutate(Total=A+B+C+D+E,names=row.names(.))%>%arrange(-Total)
+impvar<-NULL
+
+varImpPlot(model, n.var = 10,main="Variable Importance",bg="blue",color="red")
+
+
+for(i in 1: 19){impvar<-paste(impvar,impdata[,7][i],"+")}
+impvar<-paste(impvar,impdata[,7][20])
+form<-as.formula(paste("classe~",impvar))
+
+
+set.seed(1234)
+indexwindow<-grep("Window",names(TrainingData))
+modelfinal<- randomForest(form, data=TrainingDataProcessedCorRem[,-indexwindow], importance=TRUE)
+
+print(modelfinal)
+
+
+**Testing**
+
+Splitter<-Testing$raw_timestamp_part_1
+TestSplit<-split(Testing,Splitter)
+
+TestSplittr<-lapply(TestSplit,mutate_func)
+
+TestdataMod<-as.data.frame(NULL)
+for( i in 1:length(TestSplittr)){
+  x<-as.data.frame(TestSplittr[[i]])
+  TestdataMod<-rbind(TestdataMod,x)
+}
+indexclasse<-grep("classe",names(TestdataMod))
+indexwindow<-grep("Window",names(TestdataMod))
+
+TestingDataProcessed<-predict(PreProc,TestdataMod[,-c(indexclasse,indexwindow)])
+TestingDataProcessed<-cbind(TestingDataProcessed,classe=TestdataMod$classe,window=TestdataMod$Window)
+
+predictoutput<-predict(modelfinal,newdata=TestingDataProcessed)
+confusionMatrix(predictoutput,TestingDataProcessed$classe)
+
+for( i in 1:5){
+  predictwindow<-predict(modelfinal,newdata = subset(TestingDataProcessed,window==i))
+  cat("Window",i, "-","Accuracy:", confusionMatrix(predictwindow,subset(TestingDataProcessed,window==i)$classe)$overall[[1]],"\n")
+}
+
+**End**
+```
